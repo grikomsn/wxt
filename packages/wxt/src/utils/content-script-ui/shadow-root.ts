@@ -137,13 +137,28 @@ async function loadCss(url: string): Promise<string> {
   }
 }
 
+/**
+ * Attempt to read the current content script entrypoint name from the bundler runtime globals.
+ * Falls back to "unknown" and logs a warning when it cannot be determined.
+ */
 function getEntrypointName(): string {
   const entrypoint =
     // @ts-expect-error: `import.meta.env` is typed by the consumer project
     import.meta.env?.ENTRYPOINT ?? (globalThis as any).__ENTRYPOINT__;
+  if (!entrypoint) {
+    logger.warn(
+      'Could not determine content script entrypoint name (import.meta.env.ENTRYPOINT / globalThis.__ENTRYPOINT__ are undefined). ' +
+        "Falling back to 'unknown', which will attempt to load /content-scripts/unknown.css. " +
+        'Ensure your build is configuring an ENTRYPOINT name for content scripts.',
+    );
+    return 'unknown';
+  }
   return entrypoint ?? 'unknown';
 }
 
+/**
+ * Construct the runtime URL for the content script CSS asset for a given entrypoint.
+ */
 function getContentScriptCssUrl(entrypointName: string): string {
   return (
     browser.runtime
@@ -152,23 +167,36 @@ function getContentScriptCssUrl(entrypointName: string): string {
   );
 }
 
-const CSS_URL_REGEX = /url\(([^)]+)\)/g;
-const EXTENSION_PROTOCOLS = new Set([
-  'chrome-extension:',
-  'moz-extension:',
-  'safari-web-extension:',
-  'ms-browser-extension:',
-  'wxt-extension:',
-]);
-
+/**
+ * Matches CSS url() references with or without quotes.
+ *
+ * Captures one of:
+ * 1. Single-quoted URL
+ * 2. Double-quoted URL
+ * 3. Unquoted URL (until the closing parenthesis)
+ */
+const CSS_URL_REGEX = /url\(\s*(?:'([^']*)'|"([^"]*)"|([^)]+?))\s*\)/g;
+/**
+ * Rewrite CSS url() references to use extension runtime URLs when they point to the current
+ * extension. External URLs (http/https), data URLs, and hashes are left untouched.
+ *
+ * @param css CSS text to rewrite.
+ * @param baseUrl The URL of the current entrypoint CSS file, used to resolve relative paths.
+ * @returns The rewritten CSS text.
+ */
 function rewriteCssUrls(css: string, baseUrl: string): string {
   if (!css) return css;
-  return css.replace(CSS_URL_REGEX, (match, rawUrl) => {
+  return css.replace(CSS_URL_REGEX, (match, single, double, unquoted) => {
+    const rawUrl = single ?? double ?? unquoted ?? '';
     const resolved = resolveExtensionAssetUrl(rawUrl, baseUrl);
     return resolved ? `url("${resolved}")` : match;
   });
 }
 
+/**
+ * Resolve a raw URL from CSS against the entrypoint base URL, returning a runtime URL for
+ * assets that belong to the current extension. External URLs and data URLs are skipped.
+ */
 function resolveExtensionAssetUrl(
   rawUrl: string,
   baseUrl: string,
@@ -187,19 +215,10 @@ function resolveExtensionAssetUrl(
   try {
     const base = new URL(baseUrl);
     const resolved = new URL(trimmed, base);
-    const isExtensionResource =
-      resolved.origin === base.origin ||
-      EXTENSION_PROTOCOLS.has(resolved.protocol);
+    const isExtensionResource = resolved.origin === base.origin;
     if (!isExtensionResource) return;
 
-    // Include the host when the resolved URL points to a different origin (like a custom
-    // `wxt-extension://assets/...` URL) so the asset path isn't lost.
-    const shouldIncludeHost =
-      resolved.origin !== base.origin && resolved.host !== '';
-    const pathWithoutSearch = shouldIncludeHost
-      ? `${resolved.host}${resolved.pathname}`
-      : resolved.pathname;
-    const path = `${pathWithoutSearch}${resolved.search}${resolved.hash}`;
+    const path = `${resolved.pathname}${resolved.search}${resolved.hash}`;
 
     return browser.runtime.getURL(path.startsWith('/') ? path : `/${path}`);
   } catch {

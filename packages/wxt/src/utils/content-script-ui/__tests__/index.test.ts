@@ -141,6 +141,48 @@ describe('Content Script UIs', () => {
         );
       });
 
+      it('should skip external/data urls and preserve queries, hashes, quotes, and spaces', async () => {
+        const css = `
+.icon-data { background: url(data:image/svg+xml,<svg><path d="M(0,0)"/></svg>); }
+.icon-http { background: url("https://example.com/icon.png"); }
+.icon-query { background: url('/images/icon.svg?v=1#hash'); }
+.icon-space { background: url("images/my icon.svg"); }
+.icon-single { background: url('../assets/custom.woff2'); }
+.icon-noquote { background: url(../assets/another.ttf#frag); }
+`.trim();
+        fetch.mockResolvedValueOnce({ text: () => Promise.resolve(css) });
+
+        const ui = await createShadowRootUi(
+          new ContentScriptContext('test', { cssInjectionMode: 'ui' }),
+          {
+            position: 'inline',
+            name: 'test-component',
+            onMount: appendTestApp,
+          },
+        );
+
+        ui.mount();
+
+        const shadowStyle = ui.shadow.querySelector('style')?.textContent ?? '';
+
+        expect(shadowStyle).toContain(
+          'url(data:image/svg+xml,<svg><path d="M(0,0)"/></svg>)',
+        );
+        expect(shadowStyle).toContain('url("https://example.com/icon.png")');
+        expect(shadowStyle).toContain(
+          'url("chrome-extension://test-extension-id/images/icon.svg?v=1#hash")',
+        );
+        expect(shadowStyle).toContain(
+          'url("chrome-extension://test-extension-id/content-scripts/images/my%20icon.svg")',
+        );
+        expect(shadowStyle).toContain(
+          'url("chrome-extension://test-extension-id/assets/custom.woff2")',
+        );
+        expect(shadowStyle).toContain(
+          'url("chrome-extension://test-extension-id/assets/another.ttf#frag")',
+        );
+      });
+
       it.each([
         ['open', 'open'],
         [undefined, 'open'],
