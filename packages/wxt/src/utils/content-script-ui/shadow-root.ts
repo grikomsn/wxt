@@ -19,7 +19,9 @@ export async function createShadowRootUi<TMounted>(
   options: ShadowRootContentScriptUiOptions<TMounted>,
 ): Promise<ShadowRootContentScriptUi<TMounted>> {
   const instanceId = Math.random().toString(36).substring(2, 15);
+  const entrypointName = getEntrypointName();
   const css: string[] = [];
+  let entryCssUrl: string | undefined;
 
   if (!options.inheritStyles) {
     css.push(`/* WXT Shadow Root Reset */ :host{all:initial !important;}`);
@@ -28,13 +30,17 @@ export async function createShadowRootUi<TMounted>(
     css.push(options.css);
   }
   if (ctx.options?.cssInjectionMode === 'ui') {
-    const entryCss = await loadCss();
+    entryCssUrl = getContentScriptCssUrl(entrypointName);
+    const entryCss = await loadCss(entryCssUrl);
     // Replace :root selectors with :host since we're in a shadow root
     css.push(entryCss.replaceAll(':root', ':host'));
   }
 
   // Some rules must be applied outside the shadow root, so split the CSS apart
-  const { shadowCss, documentCss } = splitShadowRootCss(css.join('\n').trim());
+  const cssTextRaw = css.join('\n').trim();
+  const cssText =
+    entryCssUrl != null ? rewriteCssUrls(cssTextRaw, entryCssUrl) : cssTextRaw;
+  const { shadowCss, documentCss } = splitShadowRootCss(cssText);
 
   const {
     isolatedElement: uiContainer,
@@ -118,10 +124,7 @@ export async function createShadowRootUi<TMounted>(
 /**
  * Load the CSS for the current entrypoint.
  */
-async function loadCss(): Promise<string> {
-  const url = browser.runtime
-    // @ts-expect-error: getURL is defined per-project, but not inside the package
-    .getURL(`/content-scripts/${import.meta.env.ENTRYPOINT}.css`);
+async function loadCss(url: string): Promise<string> {
   try {
     const res = await fetch(url);
     return await res.text();
@@ -131,6 +134,76 @@ async function loadCss(): Promise<string> {
       err,
     );
     return '';
+  }
+}
+
+function getEntrypointName(): string {
+  const entrypoint =
+    // @ts-expect-error: `import.meta.env` is typed by the consumer project
+    import.meta.env?.ENTRYPOINT ?? (globalThis as any).__ENTRYPOINT__;
+  return entrypoint ?? 'unknown';
+}
+
+function getContentScriptCssUrl(entrypointName: string): string {
+  return (
+    browser.runtime
+      // @ts-expect-error: getURL is defined per-project, but not inside the package
+      .getURL(`/content-scripts/${entrypointName}.css`)
+  );
+}
+
+const CSS_URL_REGEX = /url\(([^)]+)\)/g;
+const EXTENSION_PROTOCOLS = new Set([
+  'chrome-extension:',
+  'moz-extension:',
+  'safari-web-extension:',
+  'ms-browser-extension:',
+  'wxt-extension:',
+]);
+
+function rewriteCssUrls(css: string, baseUrl: string): string {
+  if (!css) return css;
+  return css.replace(CSS_URL_REGEX, (match, rawUrl) => {
+    const resolved = resolveExtensionAssetUrl(rawUrl, baseUrl);
+    return resolved ? `url("${resolved}")` : match;
+  });
+}
+
+function resolveExtensionAssetUrl(
+  rawUrl: string,
+  baseUrl: string,
+): string | undefined {
+  const trimmed = rawUrl.trim().replace(/^['"]|['"]$/g, '');
+  if (!trimmed) return;
+  if (
+    trimmed.startsWith('data:') ||
+    trimmed.startsWith('http:') ||
+    trimmed.startsWith('https:') ||
+    trimmed.startsWith('blob:') ||
+    trimmed.startsWith('#')
+  )
+    return;
+
+  try {
+    const base = new URL(baseUrl);
+    const resolved = new URL(trimmed, base);
+    const isExtensionResource =
+      resolved.origin === base.origin ||
+      EXTENSION_PROTOCOLS.has(resolved.protocol);
+    if (!isExtensionResource) return;
+
+    // Include the host when the resolved URL points to a different origin (like a custom
+    // `wxt-extension://assets/...` URL) so the asset path isn't lost.
+    const shouldIncludeHost =
+      resolved.origin !== base.origin && resolved.host !== '';
+    const pathWithoutSearch = shouldIncludeHost
+      ? `${resolved.host}${resolved.pathname}`
+      : resolved.pathname;
+    const path = `${pathWithoutSearch}${resolved.search}${resolved.hash}`;
+
+    return browser.runtime.getURL(path.startsWith('/') ? path : `/${path}`);
+  } catch {
+    return;
   }
 }
 

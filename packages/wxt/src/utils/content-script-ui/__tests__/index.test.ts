@@ -108,6 +108,39 @@ describe('Content Script UIs', () => {
         expect(ui.shadow.querySelector('app')).not.toBeNull();
       });
 
+      it('should rewrite extension asset urls when injecting CSS', async () => {
+        const css = `
+@font-face {
+  font-family: "CustomFont";
+  src: url("../assets/custom.woff2");
+}
+.icon {
+  background: url("/images/icon.svg");
+}`.trim();
+        fetch.mockResolvedValueOnce({ text: () => Promise.resolve(css) });
+
+        const ui = await createShadowRootUi(
+          new ContentScriptContext('test', { cssInjectionMode: 'ui' }),
+          {
+            position: 'inline',
+            name: 'test-component',
+            onMount: appendTestApp,
+          },
+        );
+
+        ui.mount();
+
+        const documentStyle = document.querySelector(
+          'style[wxt-shadow-root-document-styles]',
+        );
+        expect(documentStyle?.textContent).toContain(
+          'url("chrome-extension://test-extension-id/assets/custom.woff2")',
+        );
+        expect(ui.shadow.querySelector('style')?.textContent).toContain(
+          'url("chrome-extension://test-extension-id/images/icon.svg")',
+        );
+      });
+
       it.each([
         ['open', 'open'],
         [undefined, 'open'],
