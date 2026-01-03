@@ -122,7 +122,7 @@ export async function createShadowRootUi<TMounted>(
 }
 
 /**
- * Load the CSS for the current entrypoint.
+ * Load CSS from the specified URL.
  */
 async function loadCss(url: string): Promise<string> {
   try {
