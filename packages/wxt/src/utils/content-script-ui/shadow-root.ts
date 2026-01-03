@@ -153,7 +153,7 @@ function getEntrypointName(): string {
     );
     return 'unknown';
   }
-  return entrypoint ?? 'unknown';
+  return entrypoint;
 }
 
 /**
@@ -175,7 +175,8 @@ function getContentScriptCssUrl(entrypointName: string): string {
  * 2. Double-quoted URL
  * 3. Unquoted URL (until the closing parenthesis)
  */
-const CSS_URL_REGEX = /url\(\s*(?:'([^']*)'|"([^"]*)"|([^)]+?))\s*\)/g;
+const CSS_URL_REGEX =
+  /url\(\s*(?:'((?:\\.|[^'\\])*)'|"((?:\\.|[^"\\])*)"|([^)]+?))\s*\)/g;
 /**
  * Rewrite CSS url() references to use extension runtime URLs when they point to the current
  * extension. External URLs (http/https), data URLs, and hashes are left untouched.
@@ -201,7 +202,7 @@ function resolveExtensionAssetUrl(
   rawUrl: string,
   baseUrl: string,
 ): string | undefined {
-  const trimmed = rawUrl.trim().replace(/^['"]|['"]$/g, '');
+  const trimmed = rawUrl.trim();
   if (!trimmed) return;
   if (
     trimmed.startsWith('data:') ||
@@ -220,7 +221,7 @@ function resolveExtensionAssetUrl(
 
     const path = `${resolved.pathname}${resolved.search}${resolved.hash}`;
 
-    return browser.runtime.getURL(path.startsWith('/') ? path : `/${path}`);
+    return browser.runtime.getURL(path);
   } catch {
     return;
   }
