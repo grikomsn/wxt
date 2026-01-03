@@ -19,7 +19,9 @@ export async function createShadowRootUi<TMounted>(
   options: ShadowRootContentScriptUiOptions<TMounted>,
 ): Promise<ShadowRootContentScriptUi<TMounted>> {
   const instanceId = Math.random().toString(36).substring(2, 15);
+  const entrypointName = getEntrypointName();
   const css: string[] = [];
+  let entryCssUrl: string | undefined;
 
   if (!options.inheritStyles) {
     css.push(`/* WXT Shadow Root Reset */ :host{all:initial !important;}`);
@@ -28,13 +30,17 @@ export async function createShadowRootUi<TMounted>(
     css.push(options.css);
   }
   if (ctx.options?.cssInjectionMode === 'ui') {
-    const entryCss = await loadCss();
+    entryCssUrl = getContentScriptCssUrl(entrypointName);
+    const entryCss = await loadCss(entryCssUrl);
     // Replace :root selectors with :host since we're in a shadow root
     css.push(entryCss.replaceAll(':root', ':host'));
   }
 
   // Some rules must be applied outside the shadow root, so split the CSS apart
-  const { shadowCss, documentCss } = splitShadowRootCss(css.join('\n').trim());
+  const cssTextRaw = css.join('\n').trim();
+  const cssText =
+    entryCssUrl != null ? rewriteCssUrls(cssTextRaw, entryCssUrl) : cssTextRaw;
+  const { shadowCss, documentCss } = splitShadowRootCss(cssText);
 
   const {
     isolatedElement: uiContainer,
@@ -116,12 +122,9 @@ export async function createShadowRootUi<TMounted>(
 }
 
 /**
- * Load the CSS for the current entrypoint.
+ * Load CSS from the specified URL.
  */
-async function loadCss(): Promise<string> {
-  const url = browser.runtime
-    // @ts-expect-error: getURL is defined per-project, but not inside the package
-    .getURL(`/content-scripts/${import.meta.env.ENTRYPOINT}.css`);
+async function loadCss(url: string): Promise<string> {
   try {
     const res = await fetch(url);
     return await res.text();
@@ -131,6 +134,96 @@ async function loadCss(): Promise<string> {
       err,
     );
     return '';
+  }
+}
+
+/**
+ * Attempt to read the current content script entrypoint name from the bundler runtime globals.
+ * Falls back to "unknown" and logs a warning when it cannot be determined.
+ */
+function getEntrypointName(): string {
+  const entrypoint =
+    // @ts-expect-error: `import.meta.env` is typed by the consumer project
+    import.meta.env?.ENTRYPOINT ?? (globalThis as any).__ENTRYPOINT__;
+  if (!entrypoint) {
+    logger.warn(
+      'Could not determine content script entrypoint name (import.meta.env.ENTRYPOINT / globalThis.__ENTRYPOINT__ are undefined). ' +
+        "Falling back to 'unknown', which will attempt to load /content-scripts/unknown.css. " +
+        'Ensure your build is configuring an ENTRYPOINT name for content scripts.',
+    );
+    return 'unknown';
+  }
+  return entrypoint;
+}
+
+/**
+ * Construct the runtime URL for the content script CSS asset for a given entrypoint.
+ */
+function getContentScriptCssUrl(entrypointName: string): string {
+  return (
+    browser.runtime
+      // @ts-expect-error: getURL is defined per-project, but not inside the package
+      .getURL(`/content-scripts/${entrypointName}.css`)
+  );
+}
+
+/**
+ * Matches CSS url() references with or without quotes.
+ *
+ * Captures one of:
+ * 1. Single-quoted URL
+ * 2. Double-quoted URL
+ * 3. Unquoted URL (until the closing parenthesis)
+ */
+const CSS_URL_REGEX =
+  /url\(\s*(?:'((?:\\.|[^'\\])*)'|"((?:\\.|[^"\\])*)"|([^)]+?))\s*\)/g;
+/**
+ * Rewrite CSS url() references to use extension runtime URLs when they point to the current
+ * extension. External URLs (http/https), data URLs, and hashes are left untouched.
+ *
+ * @param css CSS text to rewrite.
+ * @param baseUrl The URL of the current entrypoint CSS file, used to resolve relative paths.
+ * @returns The rewritten CSS text.
+ */
+function rewriteCssUrls(css: string, baseUrl: string): string {
+  if (!css) return css;
+  return css.replace(CSS_URL_REGEX, (match, single, double, unquoted) => {
+    const rawUrl = single ?? double ?? unquoted ?? '';
+    const resolved = resolveExtensionAssetUrl(rawUrl, baseUrl);
+    return resolved ? `url("${resolved}")` : match;
+  });
+}
+
+/**
+ * Resolve a raw URL from CSS against the entrypoint base URL, returning a runtime URL for
+ * assets that belong to the current extension. External URLs and data URLs are skipped.
+ */
+function resolveExtensionAssetUrl(
+  rawUrl: string,
+  baseUrl: string,
+): string | undefined {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return;
+  if (
+    trimmed.startsWith('data:') ||
+    trimmed.startsWith('http:') ||
+    trimmed.startsWith('https:') ||
+    trimmed.startsWith('blob:') ||
+    trimmed.startsWith('#')
+  )
+    return;
+
+  try {
+    const base = new URL(baseUrl);
+    const resolved = new URL(trimmed, base);
+    const isExtensionResource = resolved.origin === base.origin;
+    if (!isExtensionResource) return;
+
+    const path = `${resolved.pathname}${resolved.search}${resolved.hash}`;
+
+    return browser.runtime.getURL(path);
+  } catch {
+    return;
   }
 }
 
